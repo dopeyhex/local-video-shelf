@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Видео</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <nav class="tabs" aria-label="Разделы библиотеки">
+        <button class="tab is-active" id="tabNew" type="button" data-tab="new">
+          <span>Новые</span>
+          <span class="tab-count" id="newCount">0</span>
+        </button>
+        <button class="tab" id="tabWatched" type="button" data-tab="watched">
+          <span>Просмотренные</span>
+          <span class="tab-count" id="watchedCount">0</span>
+        </button>
+      </nav>
+
+      <div class="error" id="errorBox" hidden></div>
+      <section class="list" id="videoList" hidden></section>
+    </main>
+
+    <video class="player" id="player" controls hidden></video>
+    <div class="player-loading" id="playerLoading" hidden aria-label="Buffering">
+      <div class="player-loading__spinner" aria-hidden="true"></div>
+    </div>
+    <div class="player-ui" id="playerUi" hidden>
+      <input
+        class="player-ui__volume-float"
+        id="playerVolume"
+        type="range"
+        min="0"
+        max="100"
+        value="100"
+        step="1"
+        aria-label="Volume"
+      />
+      <div class="player-ui__bottom">
+        <button class="player-ui__toggle" id="playerToggle" type="button">
+          Play
+        </button>
+        <input
+          class="player-ui__seek"
+          id="playerSeek"
+          type="range"
+          min="0"
+          max="1000"
+          value="0"
+          step="1"
+        />
+        <div class="player-ui__time" id="playerTime">0:00 / 0:00</div>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

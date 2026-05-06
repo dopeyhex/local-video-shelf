@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Admin · Local Video Shelf</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="header">
+        <div>
+          <h1>Admin: Convert & prepare</h1>
+          <p>
+            If a video is not MP4/MOV, convert it. If it is MP4/MOV, prepare a “fast start” copy for smoother streaming.
+          </p>
+        </div>
+        <div class="actions">
+          <a class="pill" href="/index.html">Back to library</a>
+        </div>
+      </header>
+
+      <div class="info-grid">
+        <div class="info-card">
+          <strong>What “prepare” means</strong>
+          Creates a cached MP4/MOV copy with “fast start” metadata so browsers (especially Safari) can begin playback sooner.
+        </div>
+        <div class="info-card" id="ffmpegNotice">
+          <strong>FFmpeg status</strong>
+          Checking for ffmpeg...
+        </div>
+      </div>
+
+      <div class="error" id="adminError" hidden></div>
+      <section class="admin-list" id="adminList">
+        <div class="empty">Loading...</div>
+      </section>
+    </main>
+
+    <script src="/admin.js"></script>
+  </body>
+</html>
