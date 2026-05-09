@@ -191,12 +191,15 @@ const folderPathForVideo = (video) => {
   return index > 0 ? path.slice(0, index) : "";
 };
 
-const folderNameFromPath = (path) => {
-  const normalized = normalizeMediaPath(path);
-  if (!normalized) return "";
-  const parts = normalized.split("/").filter(Boolean);
-  return parts[parts.length - 1] || normalized;
-};
+const createFolderNode = ({ key = "", name = "", parentKey = null } = {}) => ({
+  key,
+  name,
+  path: key,
+  parentKey,
+  count: 0,
+  folders: new Map(),
+  videos: [],
+});
 
 const markLocalWatched = (videoPath) => {
   if (!videoPath) return;
@@ -670,37 +673,61 @@ const createVideoCard = (video) => {
   return card;
 };
 
-const buildFolderEntries = (tabVideos) => {
-  const buckets = new Map();
-  tabVideos.forEach((video) => {
-    const key = folderPathForVideo(video);
-    if (!key) return;
-    if (!buckets.has(key)) {
-      buckets.set(key, {
-        key,
-        name: folderNameFromPath(key),
-        path: key,
-        videos: [],
-      });
-    }
-    buckets.get(key).videos.push(video);
-  });
-
-  const renderedGroups = new Set();
-  const entries = [];
+const buildFolderTree = (tabVideos) => {
+  const root = createFolderNode();
 
   tabVideos.forEach((video) => {
-    const key = folderPathForVideo(video);
-    if (key) {
-      if (renderedGroups.has(key)) return;
-      renderedGroups.add(key);
-      entries.push({ type: "folder", group: buckets.get(key) });
-      return;
-    }
-    entries.push({ type: "video", video });
+    const folderParts = folderPathForVideo(video).split("/").filter(Boolean);
+    let node = root;
+    const ancestry = [root];
+
+    folderParts.forEach((name) => {
+      const key = node.key ? `${node.key}/${name}` : name;
+      if (!node.folders.has(key)) {
+        node.folders.set(
+          key,
+          createFolderNode({
+            key,
+            name,
+            parentKey: node.key || null,
+          })
+        );
+      }
+      node = node.folders.get(key);
+      ancestry.push(node);
+    });
+
+    node.videos.push(video);
+    ancestry.forEach((ancestor) => {
+      ancestor.count += 1;
+    });
   });
 
-  return entries;
+  return root;
+};
+
+const findFolderNode = (root, key) => {
+  if (!key) return root;
+  const parts = normalizeMediaPath(key).split("/").filter(Boolean);
+  let node = root;
+  let currentKey = "";
+  for (const name of parts) {
+    currentKey = currentKey ? `${currentKey}/${name}` : name;
+    node = node.folders.get(currentKey);
+    if (!node) return null;
+  }
+  return node;
+};
+
+const folderNodeEntries = (node) => {
+  const folderEntries = Array.from(node.folders.values())
+    .sort((left, right) =>
+      left.name.localeCompare(right.name, undefined, { sensitivity: "base" })
+    )
+    .map((group) => ({ type: "folder", group }));
+
+  const videoEntries = node.videos.map((video) => ({ type: "video", video }));
+  return folderEntries.concat(videoEntries);
 };
 
 const createFolderCard = (group) => {
@@ -723,8 +750,8 @@ const createFolderCard = (group) => {
   count.className = "folder-card__count";
   count.textContent =
     group.path && group.path !== group.name
-      ? `${group.path} · ${group.videos.length} видео`
-      : `${group.videos.length} видео`;
+      ? `${group.path} · ${group.count} видео`
+      : `${group.count} видео`;
 
   body.appendChild(label);
   body.appendChild(count);
@@ -736,6 +763,16 @@ const createFolderCard = (group) => {
   });
 
   return card;
+};
+
+const renderFolderEntries = (container, entries) => {
+  entries.forEach((entry) => {
+    if (entry.type === "video") {
+      container.appendChild(createVideoCard(entry.video));
+      return;
+    }
+    container.appendChild(createFolderCard(entry.group));
+  });
 };
 
 const createFolderPanel = (group) => {
@@ -752,17 +789,17 @@ const createFolderPanel = (group) => {
   const meta = document.createElement("p");
   meta.textContent =
     group.path && group.path !== group.name
-      ? `${group.path} · ${group.videos.length} видео`
-      : `${group.videos.length} видео`;
+      ? `${group.path} · ${group.count} видео`
+      : `${group.count} видео`;
   titleWrap.appendChild(title);
   titleWrap.appendChild(meta);
 
   const closeButton = document.createElement("button");
   closeButton.className = "folder-close";
   closeButton.type = "button";
-  closeButton.textContent = "Закрыть";
+  closeButton.textContent = group.parentKey ? "Назад" : "Закрыть";
   closeButton.addEventListener("click", () => {
-    openFolderKey = null;
+    openFolderKey = group.parentKey || null;
     renderLibrary();
   });
 
@@ -772,9 +809,7 @@ const createFolderPanel = (group) => {
 
   const grid = document.createElement("div");
   grid.className = "folder-panel__grid";
-  group.videos.forEach((video) => {
-    grid.appendChild(createVideoCard(video));
-  });
+  renderFolderEntries(grid, folderNodeEntries(group));
   panel.appendChild(grid);
 
   return panel;
@@ -816,25 +851,19 @@ const renderVideos = (tabVideos) => {
     return;
   }
 
-  const entries = buildFolderEntries(tabVideos);
-  const openEntry = entries.find(
-    (entry) => entry.type === "folder" && entry.group.key === openFolderKey
-  );
-  if (openFolderKey && !openEntry) {
+  const tree = buildFolderTree(tabVideos);
+  let currentFolder = openFolderKey ? findFolderNode(tree, openFolderKey) : null;
+  if (openFolderKey && !currentFolder) {
     openFolderKey = null;
+    currentFolder = null;
   }
 
-  entries.forEach((entry) => {
-    if (entry.type === "video") {
-      list.appendChild(createVideoCard(entry.video));
-      return;
-    }
-    if (entry.group.key === openFolderKey) {
-      list.appendChild(createFolderPanel(entry.group));
-      return;
-    }
-    list.appendChild(createFolderCard(entry.group));
-  });
+  if (currentFolder) {
+    list.appendChild(createFolderPanel(currentFolder));
+    return;
+  }
+
+  renderFolderEntries(list, folderNodeEntries(tree));
 };
 
 const renderLibrary = () => {

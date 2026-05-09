@@ -298,7 +298,7 @@ def _get_media_stat(relative_path):
         return None, None
 
 
-def _iter_key_labels(relative_path):
+def _iter_key_labels(relative_path, include_media_dir_prefix=False):
     """Yield the relative-path labels that may have been used for caching.
 
     This helps survive restarts when the server is launched with a different --media-dir
@@ -312,9 +312,15 @@ def _iter_key_labels(relative_path):
         return
     parts = [part for part in normalized.split("/") if part and part != "."]
     seen = set()
+    labels = []
     # Most-specific first: full path, then progressively drop leading folders.
-    for index in range(len(parts)):
-        label = "/".join(parts[index:])
+    labels.extend("/".join(parts[index:]) for index in range(len(parts)))
+    if include_media_dir_prefix and MEDIA_DIR:
+        media_name = os.path.basename(os.path.abspath(MEDIA_DIR))
+        if media_name and parts[0] != media_name:
+            labels.append("/".join([media_name] + parts))
+
+    for label in labels:
         if label and label not in seen:
             seen.add(label)
             yield label
@@ -359,7 +365,7 @@ def _compute_media_key_candidates(relative_path):
     _, stat = _get_media_stat(relative_path)
     if not stat:
         return
-    for label in _iter_key_labels(relative_path):
+    for label in _iter_key_labels(relative_path, include_media_dir_prefix=True):
         for mtime_seconds in _mtime_seconds_candidates(stat):
             yield _compute_key_from(label, stat, mtime_seconds)
 

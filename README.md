@@ -52,12 +52,14 @@ The library is split into two tabs:
 
 Videos are grouped by their real folders inside `--media-dir`.
 Files in the top level of `--media-dir` appear directly in the library.
-Files inside a real folder appear inside that folder in the web interface. For example:
+Files inside real folders appear inside the same folder hierarchy in the web interface. For example:
 
 - `Italy/day 1.mp4`
 - `Italy/day 2.mp4`
 
 will appear in a folder named `Italy` in the web interface.
+
+Nested folders are preserved too: `Shows/Season 1/Episode 1.mp4` appears under `Shows`, then `Season 1`.
 
 Movie names no longer create virtual folders.
 
