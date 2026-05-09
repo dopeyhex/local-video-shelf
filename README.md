@@ -63,6 +63,23 @@ Nested folders are preserved too: `Shows/Season 1/Episode 1.mp4` appears under `
 
 Movie names no longer create virtual folders.
 
+### Folder artwork
+
+You can add `.jpg`, `.jpeg`, or `.png` images next to real folders to use them as folder artwork.
+
+Example:
+
+- `A.jpg`
+- `A/A1/video.mp4`
+- `A/A2/video.mp4`
+
+If `A/A1.jpg` and `A/A2.jpg` do not exist, the folder cards `A`, `A1`, `A2`, and videos inside them inherit `A.jpg`.
+
+More specific images override inherited ones:
+
+- `A/A1.jpg` is used for folder `A1` and videos inside `A/A1`
+- `A/A1/video.jpg` is used only for `A/A1/video.mp4`
+
 “Prepared” means:
 
 - The file is `.mp4`, `.m4v`, or `.mov`, and

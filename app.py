@@ -42,6 +42,7 @@ MEDIA_EXTENSIONS = {
     ".wmv",
     ".m2ts",
 }
+THUMBNAIL_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -748,6 +749,55 @@ def _find_existing_thumb(relative_path):
     return None
 
 
+def _find_image_for_stem(directory, stem):
+    if not directory or not stem:
+        return None
+    for thumb_ext in THUMBNAIL_EXTENSIONS:
+        candidate = os.path.join(directory, f"{stem}{thumb_ext}")
+        try:
+            if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _folder_icon_for_directory(folder_path):
+    if not folder_path or not os.path.isdir(folder_path):
+        return None
+    parent = os.path.dirname(folder_path)
+    stem = os.path.basename(folder_path)
+    return _find_image_for_stem(parent, stem)
+
+
+def find_folder_icon_path(relative_path):
+    """Find the nearest folder icon for a URL-style relative path."""
+    normalized = relative_path.strip().replace("\\", "/").strip("/")
+    normalized = posixpath.normpath(normalized)
+    if normalized in ("", "."):
+        return None
+    parts = [part for part in normalized.split("/") if part and part != "."]
+    for end_index in range(len(parts), 0, -1):
+        folder_relative_path = "/".join(parts[:end_index])
+        folder_path = safe_join(MEDIA_DIR, folder_relative_path)
+        icon_path = _folder_icon_for_directory(folder_path)
+        if icon_path:
+            return icon_path
+    return None
+
+
+def ensure_folder_thumbnail(relative_path):
+    """Return the inherited thumbnail for a real media folder."""
+    relative_path = relative_path.strip().replace("\\", "/").strip("/")
+    folder_path = safe_join(MEDIA_DIR, relative_path)
+    if not folder_path or not os.path.isdir(folder_path):
+        return None, "folder not found"
+    icon_path = find_folder_icon_path(relative_path)
+    if not icon_path:
+        return None, "folder thumbnail not available"
+    return icon_path, None
+
+
 def ensure_thumbnail(relative_path):
     """Return path to thumbnail image. Uses sidecar image or generates cached JPEG via ffmpeg."""
     relative_path = relative_path.strip().replace("\\", "/")
@@ -761,10 +811,15 @@ def ensure_thumbnail(relative_path):
 
     # Sidecar thumbnails: Movie.mp4 + Movie.jpg/png/jpeg
     base_name = os.path.splitext(file_path)[0]
-    for thumb_ext in (".png", ".jpg", ".jpeg"):
-        sidecar = base_name + thumb_ext
-        if os.path.isfile(sidecar):
-            return sidecar, None
+    sidecar = _find_image_for_stem(
+        os.path.dirname(file_path), os.path.basename(base_name)
+    )
+    if sidecar:
+        return sidecar, None
+
+    folder_icon = find_folder_icon_path(posixpath.dirname(relative_path))
+    if folder_icon:
+        return folder_icon, None
 
     if not FFMPEG_PATH:
         return None, "ffmpeg not available"
@@ -1099,6 +1154,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/thumb/"):
             self.handle_thumb(parsed.path)
             return
+        if parsed.path.startswith("/folder-thumb/"):
+            self.handle_folder_thumb(parsed.path)
+            return
         if parsed.path.startswith("/media/"):
             self.handle_media(parsed.path, head_only=False)
             return
@@ -1117,6 +1175,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/thumb/"):
             self.handle_thumb(parsed.path, head_only=True)
+            return
+        if parsed.path.startswith("/folder-thumb/"):
+            self.handle_folder_thumb(parsed.path, head_only=True)
             return
         if parsed.path.startswith("/media/"):
             self.handle_media(parsed.path, head_only=True)
@@ -1247,6 +1308,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         thumb_path, error = ensure_thumbnail(relative_path)
         if not thumb_path:
             self.send_error(404, error or "thumbnail not available")
+            return
+        self.send_file(thumb_path, head_only=head_only)
+
+    def handle_folder_thumb(self, path, head_only=False):
+        relative_path = unquote(path[len("/folder-thumb/") :])
+        if not is_safe_media_path(relative_path):
+            self.send_error(400)
+            return
+        thumb_path, error = ensure_folder_thumbnail(relative_path)
+        if not thumb_path:
+            self.send_error(404, error or "folder thumbnail not available")
             return
         self.send_file(thumb_path, head_only=head_only)
 

@@ -742,6 +742,24 @@ const createFolderCard = (group) => {
   const body = document.createElement("span");
   body.className = "folder-card__body";
 
+  const preview = document.createElement("span");
+  preview.className = "folder-card__preview";
+  const img = new Image();
+  img.loading = "lazy";
+  img.alt = "";
+  img.src = `/folder-thumb/${encodePath(group.path)}`;
+  img.addEventListener("error", () => {
+    img.remove();
+  });
+  preview.appendChild(img);
+  body.appendChild(preview);
+
+  const marker = document.createElement("span");
+  marker.className = "folder-card__marker";
+  marker.setAttribute("aria-hidden", "true");
+  marker.textContent = "Папка";
+  body.appendChild(marker);
+
   const label = document.createElement("span");
   label.className = "folder-card__label";
   label.textContent = group.name;
