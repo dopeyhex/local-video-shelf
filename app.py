@@ -387,6 +387,80 @@ def safe_join(base_dir, relative_path):
     return abs_path
 
 
+def _is_same_or_inside(path, parent):
+    try:
+        path_normalized = os.path.normcase(os.path.abspath(path))
+        parent_normalized = os.path.normcase(os.path.abspath(parent))
+        return (
+            os.path.commonpath([path_normalized, parent_normalized])
+            == parent_normalized
+        )
+    except ValueError:
+        return False
+
+
+def _prune_cache_dirs(root, dirnames):
+    """Prevent recursive media scans from treating generated cache files as media."""
+    cache_path = os.path.abspath(CACHE_DIR)
+    dirnames[:] = [
+        dirname
+        for dirname in dirnames
+        if not _is_same_or_inside(os.path.join(root, dirname), cache_path)
+    ]
+
+
+def _build_browse_video_item(
+    entry_name,
+    item_path,
+    stat,
+    ext,
+    processing_log,
+    device_positions,
+    device_watched,
+):
+    play_path = item_path
+    play_ext = ext
+    prepared = bool(get_ready_cache_path(play_path, play_ext))
+    if not prepared:
+        return None
+
+    processing = processing_log.get(item_path) or {}
+    position_seconds = 0.0
+    for position_path in (play_path, item_path):
+        try:
+            position_seconds = max(
+                position_seconds,
+                float(device_positions.get(position_path) or 0.0),
+            )
+        except (TypeError, ValueError):
+            pass
+    watched = (
+        play_path in device_watched
+        or item_path in device_watched
+        or position_seconds >= WATCHED_THRESHOLD_SECONDS
+    )
+
+    return {
+        "type": "video",
+        "name": entry_name,
+        "path": item_path,
+        "size": stat.st_size,
+        "mtime": int(stat.st_mtime),
+        "ext": ext,
+        "mp4_exists": False,
+        "can_play": True,
+        "prepared": prepared,
+        "play_path": play_path,
+        "play_ext": play_ext,
+        "position_seconds": position_seconds,
+        "watched": watched,
+        "convert_status": processing.get("convert_status"),
+        "convert_pct": processing.get("convert_pct", 0),
+        "ready_status": processing.get("ready_status"),
+        "ready_pct": processing.get("ready_pct", 0),
+    }
+
+
 def browse_media(relative_path, device_id=""):
     relative_path = relative_path.strip().replace("\\", "/")
     safe_path = safe_join(MEDIA_DIR, relative_path)
@@ -407,66 +481,35 @@ def browse_media(relative_path, device_id=""):
         with os.scandir(safe_path) as iterator:
             for entry in iterator:
                 if entry.is_dir():
+                    if _is_same_or_inside(entry.path, CACHE_DIR):
+                        continue
                     item_path = join_path(relative_path, entry.name)
                     folders.append(
                         {"type": "dir", "name": entry.name, "path": item_path}
                     )
                     continue
-                if not entry.is_file():
-                    continue
-                ext = os.path.splitext(entry.name)[1].lower()
-                if ext not in MEDIA_EXTENSIONS:
-                    continue
+
+        for root, dirnames, filenames in os.walk(safe_path):
+            _prune_cache_dirs(root, dirnames)
+            for filename in filenames:
+                ext = os.path.splitext(filename)[1].lower()
                 if ext not in DIRECT_PLAYABLE_EXTENSIONS:
                     # The library only lists prepared MP4/MOV files.
                     continue
-                stat = entry.stat()
-                item_path = join_path(relative_path, entry.name)
-                play_path = item_path
-                play_ext = ext
-
-                prepared = bool(get_ready_cache_path(play_path, play_ext))
-                if not prepared:
-                    continue
-                can_play = True
-
-                processing = processing_log.get(item_path) or {}
-                position_seconds = 0.0
-                for position_path in (play_path, item_path):
-                    try:
-                        position_seconds = max(
-                            position_seconds,
-                            float(device_positions.get(position_path) or 0.0),
-                        )
-                    except (TypeError, ValueError):
-                        pass
-                watched = (
-                    play_path in device_watched
-                    or item_path in device_watched
-                    or position_seconds >= WATCHED_THRESHOLD_SECONDS
+                full_path = os.path.join(root, filename)
+                item_path = os.path.relpath(full_path, MEDIA_DIR).replace("\\", "/")
+                stat = os.stat(full_path)
+                video = _build_browse_video_item(
+                    filename,
+                    item_path,
+                    stat,
+                    ext,
+                    processing_log,
+                    device_positions,
+                    device_watched,
                 )
-
-                videos.append(
-                    {
-                        "type": "video",
-                        "name": entry.name,
-                        "path": item_path,
-                        "size": stat.st_size,
-                        "mtime": int(stat.st_mtime),
-                        "ext": ext,
-                        "mp4_exists": False,
-                        "can_play": can_play,
-                        "prepared": prepared,
-                        "play_path": play_path,
-                        "play_ext": play_ext,
-                        "position_seconds": position_seconds,
-                        "watched": watched,
-                        "convert_status": processing.get("convert_status"),
-                        "convert_pct": processing.get("convert_pct", 0),
-                        "ready_status": processing.get("ready_status"),
-                        "ready_pct": processing.get("ready_pct", 0),
-                    }
-                )
+                if video:
+                    videos.append(video)
     except OSError:
         return {"error": "Unable to scan media directory."}
 
@@ -1359,7 +1402,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         log_changed = False
         seen_paths = set()
 
-        for root, _, files in os.walk(MEDIA_DIR):
+        for root, dirnames, files in os.walk(MEDIA_DIR):
+            _prune_cache_dirs(root, dirnames)
             for filename in files:
                 ext = os.path.splitext(filename)[1].lower()
                 if ext not in MEDIA_EXTENSIONS:

@@ -41,7 +41,7 @@ Stop the server with `Ctrl+C`.
 
 ## What files show up in the library
 
-The main page (`/` or `/index.html`) shows **prepared** videos from the *top level* of `--media-dir`.
+The main page (`/` or `/index.html`) shows **prepared** videos from `--media-dir`, including videos inside subfolders.
 
 The library is split into two tabs:
 
@@ -82,7 +82,7 @@ The admin page has two actions:
 
 ### What it does
 
-- Finds videos in your media folder (this page scans **recursively**, including subfolders).
+- Finds videos in your media folder (scans **recursively**, including subfolders).
 - For each non‑MP4/MOV file, you can click **Convert to MP4**.
 - The server runs `ffmpeg` in the background and writes a new file next to the original:
   - `Some.Video.mkv` → `Some.Video.mp4`
