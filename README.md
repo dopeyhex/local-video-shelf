@@ -1,5 +1,7 @@
 # Local Video Shelf
 
+Half-vibecoded video sharing service for my Granny.
+
 The simplest “just works” web server to watch the videos on your PC from:
 
 - Safari on iPhone/iPad
