@@ -187,10 +187,26 @@ const normalizeFolderKey = (value) =>
 
 const folderNameForVideo = (video) => {
   const title = getDisplayName(video).trim();
-  const match = title.match(/^([0-9A-Za-zА-Яа-яЁё]+)(?=[:\s._-]|$)/u);
-  if (!match) return "";
+  const underscoredMatch = title.match(
+    /^([0-9A-Za-zА-Яа-яЁё]+(?:_[0-9A-Za-zА-Яа-яЁё]+)+)/u
+  );
+  const underscoredParts = underscoredMatch ? underscoredMatch[1].split("_") : [];
+  while (
+    underscoredParts.length > 1 &&
+    /^\d+$/.test(underscoredParts[underscoredParts.length - 1])
+  ) {
+    underscoredParts.pop();
+  }
 
-  const word = match[1].trim();
+  let word = "";
+  if (underscoredParts.length > 1) {
+    word = underscoredParts.join("_");
+  } else {
+    const match = title.match(/^([0-9A-Za-zА-Яа-яЁё]+)(?=[:\s._-]|$)/u);
+    if (!match) return "";
+    word = match[1].trim();
+  }
+
   if (word.length < 2) return "";
 
   const lower = word.toLowerCase();
