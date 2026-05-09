@@ -50,17 +50,16 @@ The library is split into two tabs:
 - **New**: videos this device has not started yet.
 - **Watched**: videos this device has played for at least 10 seconds, or finished.
 
-Videos with the same first word, or the same underscore-separated prefix, are grouped into a virtual folder on the same page. For example:
+Videos are grouped by their real folders inside `--media-dir`.
+Files in the top level of `--media-dir` appear directly in the library.
+Files inside a real folder appear inside that folder in the web interface. For example:
 
-- `Italy: day 1.mp4`
-- `Italy: day 2.mp4`
+- `Italy/day 1.mp4`
+- `Italy/day 2.mp4`
 
 will appear in a folder named `Italy` in the web interface.
 
-These will appear in a folder named `Italy_travel`:
-
-- `Italy_travel_1.mp4`
-- `Italy_travel_2.mp4`
+Movie names no longer create virtual folders.
 
 “Prepared” means:
 

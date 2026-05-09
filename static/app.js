@@ -180,53 +180,22 @@ const isVideoWatched = (video) =>
   Boolean(video?.watched) ||
   Number(video?.position_seconds || 0) >= MIN_SAVE_SECONDS;
 
-const normalizeFolderKey = (value) =>
+const normalizeMediaPath = (value) =>
   String(value || "")
-    .trim()
-    .toLowerCase();
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "");
 
-const folderNameForVideo = (video) => {
-  const title = getDisplayName(video).trim();
-  const underscoredMatch = title.match(
-    /^([0-9A-Za-zА-Яа-яЁё]+(?:_[0-9A-Za-zА-Яа-яЁё]+)+)/u
-  );
-  const underscoredParts = underscoredMatch ? underscoredMatch[1].split("_") : [];
-  while (
-    underscoredParts.length > 1 &&
-    /^\d+$/.test(underscoredParts[underscoredParts.length - 1])
-  ) {
-    underscoredParts.pop();
-  }
+const folderPathForVideo = (video) => {
+  const path = normalizeMediaPath(video?.path || video?.play_path || "");
+  const index = path.lastIndexOf("/");
+  return index > 0 ? path.slice(0, index) : "";
+};
 
-  let word = "";
-  if (underscoredParts.length > 1) {
-    word = underscoredParts.join("_");
-  } else {
-    const match = title.match(/^([0-9A-Za-zА-Яа-яЁё]+)(?=[:\s._-]|$)/u);
-    if (!match) return "";
-    word = match[1].trim();
-  }
-
-  if (word.length < 2) return "";
-
-  const lower = word.toLowerCase();
-  const skipped = new Set([
-    "a",
-    "an",
-    "and",
-    "the",
-    "of",
-    "in",
-    "on",
-    "to",
-    "и",
-    "в",
-    "на",
-    "по",
-    "из",
-  ]);
-  if (skipped.has(lower)) return "";
-  return word;
+const folderNameFromPath = (path) => {
+  const normalized = normalizeMediaPath(path);
+  if (!normalized) return "";
+  const parts = normalized.split("/").filter(Boolean);
+  return parts[parts.length - 1] || normalized;
 };
 
 const markLocalWatched = (videoPath) => {
@@ -704,26 +673,25 @@ const createVideoCard = (video) => {
 const buildFolderEntries = (tabVideos) => {
   const buckets = new Map();
   tabVideos.forEach((video) => {
-    const name = folderNameForVideo(video);
-    const key = normalizeFolderKey(name);
+    const key = folderPathForVideo(video);
     if (!key) return;
     if (!buckets.has(key)) {
-      buckets.set(key, { key, name, videos: [] });
+      buckets.set(key, {
+        key,
+        name: folderNameFromPath(key),
+        path: key,
+        videos: [],
+      });
     }
     buckets.get(key).videos.push(video);
   });
 
-  const groupedKeys = new Set(
-    Array.from(buckets.values())
-      .filter((group) => group.videos.length > 1)
-      .map((group) => group.key)
-  );
   const renderedGroups = new Set();
   const entries = [];
 
   tabVideos.forEach((video) => {
-    const key = normalizeFolderKey(folderNameForVideo(video));
-    if (groupedKeys.has(key)) {
+    const key = folderPathForVideo(video);
+    if (key) {
       if (renderedGroups.has(key)) return;
       renderedGroups.add(key);
       entries.push({ type: "folder", group: buckets.get(key) });
@@ -753,7 +721,10 @@ const createFolderCard = (group) => {
 
   const count = document.createElement("span");
   count.className = "folder-card__count";
-  count.textContent = `${group.videos.length} видео`;
+  count.textContent =
+    group.path && group.path !== group.name
+      ? `${group.path} · ${group.videos.length} видео`
+      : `${group.videos.length} видео`;
 
   body.appendChild(label);
   body.appendChild(count);
@@ -770,7 +741,7 @@ const createFolderCard = (group) => {
 const createFolderPanel = (group) => {
   const panel = document.createElement("section");
   panel.className = "folder-panel";
-  panel.setAttribute("aria-label", `Папка ${group.name}`);
+  panel.setAttribute("aria-label", `Папка ${group.path || group.name}`);
 
   const header = document.createElement("div");
   header.className = "folder-panel__header";
@@ -779,7 +750,10 @@ const createFolderPanel = (group) => {
   const title = document.createElement("h2");
   title.textContent = group.name;
   const meta = document.createElement("p");
-  meta.textContent = `${group.videos.length} видео`;
+  meta.textContent =
+    group.path && group.path !== group.name
+      ? `${group.path} · ${group.videos.length} видео`
+      : `${group.videos.length} видео`;
   titleWrap.appendChild(title);
   titleWrap.appendChild(meta);
 
