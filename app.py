@@ -722,12 +722,21 @@ def build_stream_maps(file_path):
 
 def get_ready_cache_path(relative_path, ext):
     """Return a prepared 'faststart' copy path if it exists, otherwise None."""
+    info = get_ready_cache_info(relative_path, ext)
+    return info["path"] if info else None
+
+
+def get_ready_cache_info(relative_path, ext):
+    """Return prepared cache path and size if a faststart copy exists."""
     if ext not in STREAM_READY_EXTENSIONS:
         return None
     for key in _compute_media_key_candidates(relative_path) or ():
         cached = os.path.join(READY_DIR, f"{key}{ext}")
-        if os.path.isfile(cached):
-            return cached
+        try:
+            if os.path.isfile(cached):
+                return {"path": cached, "size": os.path.getsize(cached)}
+        except OSError:
+            continue
     return None
 
 
@@ -1509,9 +1518,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 base_name = os.path.splitext(full_path)[0]
                 mp4_exists = os.path.isfile(base_name + ".mp4") and ext != ".mp4"
                 is_direct = ext in DIRECT_PLAYABLE_EXTENSIONS
-                ready_cached = (
-                    bool(get_ready_cache_path(rel_path, ext)) if is_direct else False
-                )
+                ready_cache = get_ready_cache_info(rel_path, ext) if is_direct else None
+                ready_cached = bool(ready_cache)
 
                 # If the server restarted mid-job, the persisted status can be stale.
                 # Reconcile "in progress" statuses with what's actually on disk.
@@ -1556,6 +1564,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                         "is_direct": is_direct,
                         "mp4_exists": mp4_exists,
                         "ready_cached": ready_cached,
+                        "ready_cache_size": (
+                            ready_cache.get("size") if ready_cache else None
+                        ),
+                        "ready_estimated_cache_size": stat.st_size if is_direct else None,
                         "convert_status": processing.get("convert_status", "idle"),
                         "convert_pct": int(processing.get("convert_pct", 0) or 0),
                         "convert_error": processing.get("convert_error"),
@@ -1740,10 +1752,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         processing = load_processing_log().get(rel_path) or {}
+        with JOBS_LOCK:
+            job_active = ("convert", rel_path) in JOBS
+        status = processing.get("convert_status", "idle")
+        if job_active and status not in ("done", "error"):
+            status = "converting"
         self.send_json(
             {
                 "path": rel_path,
-                "status": processing.get("convert_status", "idle"),
+                "status": status,
                 "progress": processing.get("convert_pct", 0),
                 "error": processing.get("convert_error"),
             }
@@ -1885,12 +1902,22 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "Path required"}, 400)
             return
         processing = load_processing_log().get(rel_path) or {}
+        ext = os.path.splitext(rel_path)[1].lower()
+        ready_cache = get_ready_cache_info(rel_path, ext)
+        with JOBS_LOCK:
+            job_active = ("ready", rel_path) in JOBS
+        status = processing.get("ready_status", "idle")
+        if job_active and status not in ("done", "error"):
+            status = "preparing"
+        if ready_cache and status not in ("preparing", "error"):
+            status = "done"
         self.send_json(
             {
                 "path": rel_path,
-                "status": processing.get("ready_status", "idle"),
+                "status": status,
                 "progress": processing.get("ready_pct", 0),
                 "error": processing.get("ready_error"),
+                "cache_size": ready_cache.get("size") if ready_cache else None,
             }
         )
 

@@ -100,6 +100,7 @@ The admin page has two actions:
 
 - **Convert to MP4** (for non‑MP4/MOV files like MKV/AVI/WMV)
 - **Prepare for streaming** (for MP4/MOV): creates a cached “fast start” copy so playback can begin sooner
+- **Prepare all contents** on folder rows: starts prepare-for-streaming for every not-yet-prepared MP4/MOV in that folder and its subfolders
 
 ### Requirements
 
@@ -108,6 +109,8 @@ The admin page has two actions:
 ### What it does
 
 - Finds videos in your media folder (scans **recursively**, including subfolders).
+- Shows the same real folder hierarchy as the library; folders are collapsed by default.
+- Shows prepared-cache size when a cache exists, and an approximate cache-size estimate for MP4/MOV files that are not prepared yet.
 - For each non‑MP4/MOV file, you can click **Convert to MP4**.
 - The server runs `ffmpeg` in the background and writes a new file next to the original:
   - `Some.Video.mkv` → `Some.Video.mp4`
