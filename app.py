@@ -6,6 +6,7 @@ import json
 import os
 import posixpath
 import re
+import signal
 import shutil
 import socket
 import subprocess
@@ -17,8 +18,13 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 # Windows subprocess flags to prevent console windows
 SUBPROCESS_FLAGS = {}
+SUBPROCESS_POPEN_FLAGS = {"start_new_session": True}
 if sys.platform == "win32":
     SUBPROCESS_FLAGS = {"creationflags": subprocess.CREATE_NO_WINDOW}
+    SUBPROCESS_POPEN_FLAGS = {
+        "creationflags": subprocess.CREATE_NO_WINDOW
+        | subprocess.CREATE_NEW_PROCESS_GROUP
+    }
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -71,9 +77,11 @@ DIRECT_PLAYABLE_EXTENSIONS = {".mp4", ".m4v", ".mov"}
 STREAM_READY_EXTENSIONS = {".mp4", ".m4v", ".mov"}
 JOBS = set()
 JOBS_LOCK = threading.Lock()
+PROCESSING_LOCK = threading.RLock()
 POSITIONS_LOCK = threading.Lock()
 WATCHED_LOCK = threading.Lock()
 WATCHED_THRESHOLD_SECONDS = 10
+THUMBNAIL_LOCK = threading.Lock()
 
 # Browser/Windows-friendly audio settings.
 # Some players on Windows can fail to decode multichannel AAC (or HE-AAC profiles),
@@ -83,6 +91,22 @@ TARGET_AUDIO_PROFILE = "aac_low"  # AAC-LC
 TARGET_AUDIO_BITRATE = "160k"
 TARGET_AUDIO_CHANNELS = "2"
 TARGET_AUDIO_SAMPLE_RATE = "48000"
+
+
+def _env_int(name, default, minimum=1):
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+MAX_CONCURRENT_FFMPEG_JOBS = _env_int("VIDEO_MAX_CONCURRENT_FFMPEG_JOBS", 4)
+FFMPEG_JOB_TIMEOUT_SECONDS = _env_int(
+    "VIDEO_FFMPEG_JOB_TIMEOUT_SECONDS", 12 * 60 * 60, minimum=60
+)
+THUMBNAIL_TIMEOUT_SECONDS = _env_int("VIDEO_THUMBNAIL_TIMEOUT_SECONDS", 60, minimum=5)
+FFMPEG_JOB_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_FFMPEG_JOBS)
 
 
 def get_primary_ipv4():
@@ -131,6 +155,40 @@ def _run_text_command(args, timeout=2):
     except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
         return ""
     return result.stdout or ""
+
+
+def _kill_process_tree(process):
+    if not process or process.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **SUBPROCESS_FLAGS,
+            )
+        else:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        return
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
+def _start_process_timeout(process, timeout_seconds):
+    def watchdog():
+        deadline = time.monotonic() + timeout_seconds
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(1)
+        if process.poll() is None:
+            process._timed_out = True
+            _kill_process_tree(process)
+
+    threading.Thread(target=watchdog, daemon=True).start()
 
 
 def _interface_priority(name):
@@ -271,6 +329,17 @@ def join_path(base, name):
     if not base:
         return name
     return posixpath.join(base, name)
+
+
+def natural_sort_key(value):
+    """Sort names so numeric runs compare as numbers: episode 9 < episode 10."""
+    parts = re.split(r"(\d+)", str(value or "").casefold())
+    return tuple((1, int(part)) if part.isdigit() else (0, part) for part in parts)
+
+
+def natural_path_sort_key(value):
+    normalized = str(value or "").replace("\\", "/")
+    return tuple(natural_sort_key(part) for part in normalized.split("/"))
 
 
 def get_parent_path(path):
@@ -520,8 +589,8 @@ def browse_media(relative_path, device_id=""):
     except OSError:
         return {"error": "Unable to scan media directory."}
 
-    folders.sort(key=lambda item: item["name"].lower())
-    videos.sort(key=lambda item: (-item["mtime"], item["name"].lower()))
+    folders.sort(key=lambda item: natural_sort_key(item["name"]))
+    videos.sort(key=lambda item: natural_path_sort_key(item["path"]))
     return {
         "root": os.path.basename(MEDIA_DIR) or MEDIA_DIR,
         "path": relative_path,
@@ -549,8 +618,14 @@ def parse_range_header(range_header, file_size):
         return "unsatisfiable", None
 
     byte_range = range_header.split("=", 1)[1].strip()
-    if not byte_range or "," in byte_range:
+    if not byte_range:
         return "invalid", None
+    # Safari can send multi-range requests for media. We serve the first satisfiable
+    # range instead of falling back to a full-file 200 response.
+    if "," in byte_range:
+        byte_range = byte_range.split(",", 1)[0].strip()
+        if not byte_range:
+            return "invalid", None
 
     if byte_range.startswith("-"):
         try:
@@ -661,6 +736,7 @@ def probe_streams(file_path):
         stderr=subprocess.PIPE,
         text=True,
         errors="ignore",
+        timeout=30,
         **SUBPROCESS_FLAGS,
     )
     if result.returncode != 0:
@@ -844,40 +920,54 @@ def ensure_thumbnail(relative_path):
     if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) > 0:
         return thumb_path, None
 
-    cmd = [
-        FFMPEG_PATH,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-ss",
-        "00:00:03",
-        "-i",
-        file_path,
-        "-frames:v",
-        "1",
-        "-vf",
-        "scale=320:-2",
-        "-q:v",
-        "6",
-        thumb_path,
-    ]
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        errors="ignore",
-        **SUBPROCESS_FLAGS,
-    )
-    if result.returncode == 0 and os.path.isfile(thumb_path) and os.path.getsize(thumb_path) > 0:
-        return thumb_path, None
-    if os.path.isfile(thumb_path):
+    with THUMBNAIL_LOCK:
+        if os.path.isfile(thumb_path) and os.path.getsize(thumb_path) > 0:
+            return thumb_path, None
+
+        cmd = [
+            FFMPEG_PATH,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            "00:00:03",
+            "-i",
+            file_path,
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=320:-2",
+            "-q:v",
+            "6",
+            thumb_path,
+        ]
         try:
-            os.remove(thumb_path)
-        except OSError:
-            pass
-    return None, summarize_ffmpeg_error(result.stderr or "") or "thumbnail failed"
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="ignore",
+                timeout=THUMBNAIL_TIMEOUT_SECONDS,
+                **SUBPROCESS_FLAGS,
+            )
+        except subprocess.TimeoutExpired:
+            if os.path.isfile(thumb_path):
+                try:
+                    os.remove(thumb_path)
+                except OSError:
+                    pass
+            return None, "thumbnail generation timed out"
+
+        if result.returncode == 0 and os.path.isfile(thumb_path) and os.path.getsize(thumb_path) > 0:
+            return thumb_path, None
+        if os.path.isfile(thumb_path):
+            try:
+                os.remove(thumb_path)
+            except OSError:
+                pass
+        return None, summarize_ffmpeg_error(result.stderr or "") or "thumbnail failed"
 
 
 def summarize_ffmpeg_error(stderr_text):
@@ -935,19 +1025,20 @@ def load_processing_log():
 
 def write_processing_log(data):
     ensure_cache_dirs()
-    tmp_path = PROCESS_LOG_PATH + ".tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, sort_keys=True)
-        os.replace(tmp_path, PROCESS_LOG_PATH)
-    except OSError:
-        # Windows can fail replacing an open file (e.g. if it's open in an editor).
-        # Fall back to in-place overwrite.
+    with PROCESSING_LOCK:
+        tmp_path = PROCESS_LOG_PATH + ".tmp"
         try:
-            with open(PROCESS_LOG_PATH, "w", encoding="utf-8") as handle:
+            with open(tmp_path, "w", encoding="utf-8") as handle:
                 json.dump(data, handle, indent=2, sort_keys=True)
+            os.replace(tmp_path, PROCESS_LOG_PATH)
         except OSError:
-            pass
+            # Windows can fail replacing an open file (e.g. if it's open in an editor).
+            # Fall back to in-place overwrite.
+            try:
+                with open(PROCESS_LOG_PATH, "w", encoding="utf-8") as handle:
+                    json.dump(data, handle, indent=2, sort_keys=True)
+            except OSError:
+                pass
 
 
 _MISSING = object()
@@ -962,55 +1053,55 @@ def update_processing(path, kind, *, status=None, pct=None, error=_MISSING, thre
         raise ValueError("kind must be 'convert' or 'ready'")
     if not path:
         return
+    with PROCESSING_LOCK:
+        data = load_processing_log()
+        entry = data.get(path) or {}
+        # Ensure missing keys exist (load_processing_log normalizes existing entries)
+        if not isinstance(entry, dict) or "convert_pct" not in entry:
+            entry = {
+                "convert_status": "idle",
+                "convert_pct": 0,
+                "convert_error": None,
+                "ready_status": "idle",
+                "ready_pct": 0,
+                "ready_error": None,
+                "updated_at": 0,
+            }
 
-    data = load_processing_log()
-    entry = data.get(path) or {}
-    # Ensure missing keys exist (load_processing_log normalizes existing entries)
-    if not isinstance(entry, dict) or "convert_pct" not in entry:
-        entry = {
-            "convert_status": "idle",
-            "convert_pct": 0,
-            "convert_error": None,
-            "ready_status": "idle",
-            "ready_pct": 0,
-            "ready_error": None,
-            "updated_at": 0,
-        }
+        pct_key = f"{kind}_pct"
+        status_key = f"{kind}_status"
+        error_key = f"{kind}_error"
 
-    pct_key = f"{kind}_pct"
-    status_key = f"{kind}_status"
-    error_key = f"{kind}_error"
+        changed = False
 
-    changed = False
+        if pct is not None:
+            try:
+                pct_val = int(max(0, min(100, pct)))
+            except (TypeError, ValueError):
+                pct_val = 0
+            previous = entry.get(pct_key)
+            if previous != pct_val and (
+                previous is None
+                or not (
+                    isinstance(previous, int)
+                    and abs(previous - pct_val) < threshold
+                    and pct_val != 100
+                )
+            ):
+                entry[pct_key] = pct_val
+                changed = True
 
-    if pct is not None:
-        try:
-            pct_val = int(max(0, min(100, pct)))
-        except (TypeError, ValueError):
-            pct_val = 0
-        previous = entry.get(pct_key)
-        if previous != pct_val and (
-            previous is None
-            or not (
-                isinstance(previous, int)
-                and abs(previous - pct_val) < threshold
-                and pct_val != 100
-            )
-        ):
-            entry[pct_key] = pct_val
+        if status is not None:
+            entry[status_key] = str(status)
+            changed = True
+        if error is not _MISSING:
+            entry[error_key] = error
             changed = True
 
-    if status is not None:
-        entry[status_key] = str(status)
-        changed = True
-    if error is not _MISSING:
-        entry[error_key] = error
-        changed = True
-
-    if changed:
-        entry["updated_at"] = int(time.time())
-        data[path] = entry
-        write_processing_log(data)
+        if changed:
+            entry["updated_at"] = int(time.time())
+            data[path] = entry
+            write_processing_log(data)
 
 
 def load_positions():
@@ -1673,16 +1764,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             output_path,
         ])
         
+        acquired_slot = False
         try:
             update_processing(rel_path, "convert", status="converting", pct=0, error=None, threshold=0)
+            FFMPEG_JOB_SEMAPHORE.acquire()
+            acquired_slot = True
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 errors="ignore",
-                **SUBPROCESS_FLAGS,
+                **SUBPROCESS_POPEN_FLAGS,
             )
+            _start_process_timeout(process, FFMPEG_JOB_TIMEOUT_SECONDS)
 
             current_time = 0
             last_logged = -5
@@ -1711,7 +1806,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             
             process.wait()
             
-            if process.returncode == 0 and os.path.isfile(output_path):
+            if getattr(process, "_timed_out", False):
+                error_msg = f"Conversion timed out after {FFMPEG_JOB_TIMEOUT_SECONDS} seconds"
+                update_processing(rel_path, "convert", status="error", pct=0, error=error_msg, threshold=0)
+                if os.path.isfile(output_path):
+                    try:
+                        os.remove(output_path)
+                    except OSError:
+                        pass
+            elif process.returncode == 0 and os.path.isfile(output_path):
                 update_processing(rel_path, "convert", status="done", pct=100, error=None, threshold=0)
             else:
                 error_msg = summarize_ffmpeg_error("".join(output_tail)) or "Conversion failed"
@@ -1724,6 +1827,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception as e:
             update_processing(rel_path, "convert", status="error", pct=0, error=str(e), threshold=0)
         finally:
+            if acquired_slot:
+                FFMPEG_JOB_SEMAPHORE.release()
             with JOBS_LOCK:
                 JOBS.discard(job_key)
 
@@ -1735,7 +1840,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             result = subprocess.run(
                 [FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=noprint_wrappers=1:nokey=1", file_path],
-                capture_output=True, text=True, errors="ignore",
+                capture_output=True, text=True, errors="ignore", timeout=30,
                 **SUBPROCESS_FLAGS,
             )
             return float(result.stdout.strip())
@@ -1838,16 +1943,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             output_path,
         ]
 
+        acquired_slot = False
         try:
             update_processing(rel_path, "ready", status="preparing", pct=0, error=None, threshold=0)
+            FFMPEG_JOB_SEMAPHORE.acquire()
+            acquired_slot = True
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 errors="ignore",
-                **SUBPROCESS_FLAGS,
+                **SUBPROCESS_POPEN_FLAGS,
             )
+            _start_process_timeout(process, FFMPEG_JOB_TIMEOUT_SECONDS)
 
             current_time = 0
             last_logged = -5
@@ -1874,7 +1983,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                         pass
 
             process.wait()
-            if process.returncode == 0 and os.path.isfile(output_path):
+            if getattr(process, "_timed_out", False):
+                error_msg = f"Prepare timed out after {FFMPEG_JOB_TIMEOUT_SECONDS} seconds"
+                update_processing(rel_path, "ready", status="error", pct=0, error=error_msg, threshold=0)
+                if os.path.isfile(output_path):
+                    try:
+                        os.remove(output_path)
+                    except OSError:
+                        pass
+            elif process.returncode == 0 and os.path.isfile(output_path):
                 update_processing(rel_path, "ready", status="done", pct=100, error=None, threshold=0)
             else:
                 error_msg = summarize_ffmpeg_error("".join(output_tail)) or "Prepare failed"
@@ -1892,6 +2009,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
         finally:
+            if acquired_slot:
+                FFMPEG_JOB_SEMAPHORE.release()
             with JOBS_LOCK:
                 JOBS.discard(job_key)
 

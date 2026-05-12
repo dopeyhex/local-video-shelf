@@ -17,6 +17,10 @@ const TAB_STORAGE_KEY = "video_active_tab_v1";
 const MIN_SAVE_SECONDS = 10;
 const SAVE_INTERVAL_MS = 5000;
 const END_CLEAR_THRESHOLD_SECONDS = 30;
+const naturalCollator = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: "base",
+});
 
 const getOrCreateDeviceId = () => {
   try {
@@ -57,6 +61,19 @@ let uiHideTimer = null;
 let audioCtx = null;
 let audioGain = null;
 let audioSource = null;
+let playbackAbortController = null;
+let fullscreenRetryTimer = null;
+
+const clearPlaybackSessionResources = () => {
+  if (playbackAbortController) {
+    playbackAbortController.abort();
+    playbackAbortController = null;
+  }
+  if (fullscreenRetryTimer) {
+    window.clearTimeout(fullscreenRetryTimer);
+    fullscreenRetryTimer = null;
+  }
+};
 
 const showPlayerUiChrome = () => {
   if (!playerUi) return;
@@ -93,6 +110,30 @@ const bumpUiActivity = () => {
   scheduleUiAutoHide();
 };
 
+const connectWebAudioVolume = () => {
+  try {
+    if (!audioCtx) return false;
+    if (audioCtx.state === "suspended") return false;
+    if (!audioGain) {
+      audioGain = audioCtx.createGain();
+      audioGain.gain.value = 1;
+    }
+    if (!audioSource) {
+      // Can only create one source per media element.
+      audioSource = audioCtx.createMediaElementSource(player);
+    }
+    try {
+      audioSource.connect(audioGain);
+    } catch (e) {}
+    try {
+      audioGain.connect(audioCtx.destination);
+    } catch (e) {}
+    return true;
+  } catch (e) {
+    return false;
+  }
+};
+
 const ensureWebAudioVolume = () => {
   // iOS/iPadOS Safari often ignores HTMLMediaElement.volume; WebAudio gain works.
   if (!player) return false;
@@ -102,21 +143,19 @@ const ensureWebAudioVolume = () => {
 
   try {
     if (!audioCtx) audioCtx = new AudioContextCtor();
-    if (!audioGain) {
-      audioGain = audioCtx.createGain();
-      audioGain.gain.value = 1;
-    }
-    if (!audioSource) {
-      // Can only create one source per media element.
-      audioSource = audioCtx.createMediaElementSource(player);
-      audioSource.connect(audioGain);
-      audioGain.connect(audioCtx.destination);
-    }
     if (audioCtx.state === "suspended") {
       // Best-effort; must be user-gesture initiated to succeed on Safari.
-      audioCtx.resume().catch(() => {});
+      const resumePromise = audioCtx.resume();
+      if (resumePromise && typeof resumePromise.then === "function") {
+        resumePromise
+          .then(() => {
+            connectWebAudioVolume();
+            applyVolume(readEffectiveVolume());
+          })
+          .catch(() => {});
+      }
     }
-    return true;
+    return connectWebAudioVolume();
   } catch (e) {
     return false;
   }
@@ -124,7 +163,8 @@ const ensureWebAudioVolume = () => {
 
 const applyVolume = (ratio) => {
   const volume = Number.isFinite(ratio) ? Math.max(0, Math.min(1, ratio)) : 1;
-  const hasWebAudio = ensureWebAudioVolume();
+  const wantsWebAudio = isIPadLike() && (audioSource || volume < 0.995);
+  const hasWebAudio = wantsWebAudio ? ensureWebAudioVolume() : false;
   if (hasWebAudio && audioGain) {
     try {
       audioGain.gain.value = volume;
@@ -230,6 +270,8 @@ const clearError = () => {
 };
 
 const setEmptyState = () => {
+  playbackSession += 1;
+  clearPlaybackSessionResources();
   clearError();
   if (list) {
     list.textContent = "";
@@ -466,6 +508,8 @@ const requestBestFullscreen = () => {
 
 const closePlayer = () => {
   if (!player) return;
+  playbackSession += 1;
+  clearPlaybackSessionResources();
   player.pause();
   player.hidden = true;
   player.removeAttribute("src");
@@ -548,8 +592,11 @@ const openPlayer = (video) => {
   if (!player) return;
   const playbackPath = video.play_path || video.path;
   if (!playbackPath) return;
+  clearPlaybackSessionResources();
   playbackSession += 1;
   const session = playbackSession;
+  playbackAbortController = new AbortController();
+  const playbackSignal = playbackAbortController.signal;
   const ipadLike = isIPadLike();
 
   clearError();
@@ -593,7 +640,7 @@ const openPlayer = (video) => {
       } catch (e) {}
       updateCustomUi();
     },
-    { once: true }
+    { once: true, signal: playbackSignal }
   );
 
   updateCustomUi();
@@ -625,13 +672,18 @@ const openPlayer = (video) => {
 
   if (!fullscreenEntered) {
     const retryFullscreen = () => {
+      if (session !== playbackSession || currentVideoPath !== playbackPath) return;
+      if (player.hidden) return;
       if (isFullscreen()) return;
       fullscreenEntered = requestBestFullscreen() || fullscreenEntered;
     };
-    player.addEventListener("playing", retryFullscreen, { once: true });
-    player.addEventListener("canplay", retryFullscreen, { once: true });
-    player.addEventListener("loadeddata", retryFullscreen, { once: true });
-    window.setTimeout(retryFullscreen, 150);
+    player.addEventListener("playing", retryFullscreen, { once: true, signal: playbackSignal });
+    player.addEventListener("canplay", retryFullscreen, { once: true, signal: playbackSignal });
+    player.addEventListener("loadeddata", retryFullscreen, { once: true, signal: playbackSignal });
+    fullscreenRetryTimer = window.setTimeout(() => {
+      fullscreenRetryTimer = null;
+      retryFullscreen();
+    }, 150);
 
     try {
       if (playPromise && typeof playPromise.then === "function") {
@@ -721,12 +773,13 @@ const findFolderNode = (root, key) => {
 
 const folderNodeEntries = (node) => {
   const folderEntries = Array.from(node.folders.values())
-    .sort((left, right) =>
-      left.name.localeCompare(right.name, undefined, { sensitivity: "base" })
-    )
+    .sort((left, right) => naturalCollator.compare(left.name, right.name))
     .map((group) => ({ type: "folder", group }));
 
-  const videoEntries = node.videos.map((video) => ({ type: "video", video }));
+  const videoEntries = node.videos
+    .slice()
+    .sort((left, right) => naturalCollator.compare(left.name, right.name))
+    .map((video) => ({ type: "video", video }));
   return folderEntries.concat(videoEntries);
 };
 

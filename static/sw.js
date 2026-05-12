@@ -1,4 +1,4 @@
-const CACHE_NAME = 'video-app-v3';
+const CACHE_NAME = 'video-app-v4';
 const OFFLINE_URL = '/offline.html';
 
 // Files to cache for offline use
@@ -44,6 +44,16 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   // Only handle GET requests
   if (event.request.method !== 'GET') {
+    return;
+  }
+
+  const requestUrl = new URL(event.request.url);
+  if (
+    requestUrl.pathname.startsWith('/media/') ||
+    requestUrl.pathname.startsWith('/thumb/') ||
+    requestUrl.pathname.startsWith('/folder-thumb/') ||
+    requestUrl.pathname.startsWith('/api/')
+  ) {
     return;
   }
 
